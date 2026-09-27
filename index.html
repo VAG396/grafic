@@ -111,6 +111,37 @@ let GROUPS = []; // RECORDS, згруповані по (секція, місяц
 const WEEKDAYS = ['пн','вт','ср','чт','пт','сб','нд'];
 const MONTH_NAMES = ['січень','лютий','березень','квітень','травень','червень','липень','серпень','вересень','жовтень','листопад','грудень'];
 const NORMALIZED_GREEN = '#2f6f52'; // будь-який колір комірки, крім чорного, зводиться до цього зеленого
+const TRINITY_PURPLE = '#4c1925'; // колір для комірок зі словом "триніті" (з допуском на одруки)
+const TRINITY_WORD = 'триніті';
+
+// Відстань Левенштейна — щоб ловити "триніті" навіть з одрукою (пропущена/зайва/
+// переставлена літера), а не лише точний збіг.
+function levenshtein(a, b){
+  const m = a.length, n = b.length;
+  const dp = new Array(n+1);
+  for(let j=0;j<=n;j++) dp[j] = j;
+  for(let i=1;i<=m;i++){
+    let prev = dp[0]; dp[0] = i;
+    for(let j=1;j<=n;j++){
+      const tmp = dp[j];
+      dp[j] = a[i-1]===b[j-1] ? prev : 1 + Math.min(prev, dp[j], dp[j-1]);
+      prev = tmp;
+    }
+  }
+  return dp[n];
+}
+
+// Шукає у тексті комірки слово, схоже на "триніті" (без урахування регістру,
+// з допуском до 2 помилок на слово довжиною ~7 літер).
+function hasTrinityWord(text){
+  if(!text) return false;
+  const words = text.toLowerCase().split(/[^a-zа-яіїєґ']+/i).filter(Boolean);
+  for(const w of words){
+    if(Math.abs(w.length - TRINITY_WORD.length) > 3) continue;
+    if(levenshtein(w, TRINITY_WORD) <= 2) return true;
+  }
+  return false;
+}
 
 // Чорний лишається чорним, білий/прозорий трактується як порожня комірка (bg=null),
 // будь-який інший колір заливки зводиться до єдиного зеленого — щоб календар не
@@ -252,6 +283,10 @@ function buildRecords(blocks, sheetName){
       if(r.isSection) continue;
       for(const col of b.cols){
         const mark = r.marks.get(col.day) || {text:'', bg:null};
+        // Чорний має найвищий пріоритет і ніколи не перезаписується (навіть якщо
+        // в тексті знайдено "триніті") — лише не-чорні комірки можуть стати "триніті"-кольором.
+        const isBlack = mark.bg && mark.bg.toUpperCase() === '#000000';
+        const color = isBlack ? mark.bg : (hasTrinityWord(mark.text) ? TRINITY_PURPLE : (mark.bg || ''));
         out.push({
           sheet: sheetName,
           section: b.title || '',
@@ -259,7 +294,7 @@ function buildRecords(blocks, sheetName){
           doctor: r.label.trim(),
           day: col.day,
           weekday: col.weekday,
-          color: mark.bg || '',
+          color: color,
           text: mark.text || ''
         });
       }
