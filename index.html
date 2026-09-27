@@ -50,6 +50,13 @@
   .cell.night .d, .cell.night .t{color:#f2f2f2}
   .empty-note{font-size:13px;color:var(--muted)}
   #sheetPick{display:none;margin-top:10px}
+  .calhead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .calhead h2{margin:0}
+  .pinbtn{background:none;border:none;font-size:20px;line-height:1;padding:2px 4px;cursor:pointer;color:var(--accent);flex:0 0 auto}
+  .pinbtn:hover{opacity:.7}
+  .pinned-hdr{font-size:13px;color:var(--muted);font-weight:700;margin:0 0 8px;text-transform:uppercase;letter-spacing:.03em}
+  #clearBtn{display:none;margin-top:8px;background:transparent;color:var(--warn);border:1px solid var(--warn-soft);border-radius:6px;padding:6px 10px;font-size:12px}
+  #clearBtn:hover{background:var(--warn-soft)}
 
   @media (max-width:480px){
     body{padding-left:8px;padding-right:8px}
@@ -69,6 +76,7 @@
     <label for="xlsxFile">Файл .xlsx</label>
     <input type="file" id="xlsxFile" accept=".xlsx">
     <div class="status err" id="fileStatus"></div>
+    <button type="button" id="clearBtn">Очистити збережені дані</button>
     <div class="row2" id="sheetPick">
       <div>
         <select id="sheetSel"></select>
@@ -100,6 +108,45 @@ let MONTHS_ORDER = [];
 let WORKBOOK = null;
 const WEEKDAYS = ['пн','вт','ср','чт','пт','сб','нд'];
 const MONTH_NAMES = ['січень','лютий','березень','квітень','травень','червень','липень','серпень','вересень','жовтень','листопад','грудень'];
+
+const LS_FILE = 'scheduleApp:fileData';
+const LS_NAME = 'scheduleApp:fileName';
+const LS_SHEET = 'scheduleApp:sheet';
+const LS_MONTH = 'scheduleApp:month';
+const LS_PINNED = 'scheduleApp:pinned';
+let pendingMonth = null;
+
+function arrayBufferToBase64(buf){
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  for(let i=0;i<bytes.length;i+=chunk){
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  }
+  return btoa(binary);
+}
+function base64ToArrayBuffer(b64){
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+function getPinned(){
+  try{ return JSON.parse(localStorage.getItem(LS_PINNED) || '[]'); } catch(err){ return []; }
+}
+function setPinned(list){
+  try{ localStorage.setItem(LS_PINNED, JSON.stringify(list)); } catch(err){}
+}
+function isPinned(name){
+  return getPinned().includes(name.trim().toLowerCase());
+}
+function togglePinned(name){
+  const key = name.trim().toLowerCase();
+  let list = getPinned();
+  if(list.includes(key)) list = list.filter(x => x !== key);
+  else list.push(key);
+  setPinned(list);
+}
 
 function isWeekdayRow(row){
   let n = 0;
@@ -229,6 +276,11 @@ $('#xlsxFile').addEventListener('change', async e => {
   fs.className = 'status'; fs.textContent = 'Читання файлу…';
   try{
     const buf = await file.arrayBuffer();
+    try{
+      localStorage.setItem(LS_FILE, arrayBufferToBase64(buf));
+      localStorage.setItem(LS_NAME, file.name);
+      localStorage.removeItem(LS_SHEET);
+    } catch(err){ console.warn('Не вдалося зберегти файл локально:', err); }
     WORKBOOK = XLSX.read(buf, {type:'array', cellStyles:true});
     const sel = $('#sheetSel');
     sel.innerHTML = '';
@@ -237,13 +289,26 @@ $('#xlsxFile').addEventListener('change', async e => {
       sel.appendChild(opt);
     }
     $('#sheetPick').style.display = WORKBOOK.SheetNames.length > 1 ? 'flex' : 'none';
+    $('#clearBtn').style.display = 'inline-block';
     loadSheet(WORKBOOK.SheetNames[0]);
   } catch(err){
     fs.className = 'status err';
     fs.textContent = 'Не вдалось прочитати файл: ' + err.message;
   }
 });
-$('#sheetSel').addEventListener('change', e => loadSheet(e.target.value));
+$('#sheetSel').addEventListener('change', e => {
+  try{ localStorage.setItem(LS_SHEET, e.target.value); } catch(err){}
+  loadSheet(e.target.value);
+});
+$('#clearBtn').addEventListener('click', () => {
+  try{
+    localStorage.removeItem(LS_FILE);
+    localStorage.removeItem(LS_NAME);
+    localStorage.removeItem(LS_SHEET);
+    localStorage.removeItem(LS_MONTH);
+  } catch(err){}
+  location.reload();
+});
 
 function initPicker(){
   MONTHS_ORDER = [];
@@ -258,6 +323,8 @@ function initPicker(){
     monthSel.appendChild(opt);
   }
   monthSel.value = MONTHS_ORDER[MONTHS_ORDER.length - 1];
+  if(pendingMonth && MONTHS_ORDER.includes(pendingMonth)) monthSel.value = pendingMonth;
+  pendingMonth = null;
 
   const dl = $('#names');
   dl.innerHTML = '';
@@ -273,16 +340,60 @@ function initPicker(){
   }
   $('#picker').style.display = 'block';
   $('#calendars').style.display = 'block';
-  $('#calendars').innerHTML = '<p class="empty-note">Оберіть місяць і почніть вводити прізвище, щоб побачити календар.</p>';
+  renderView();
 }
+
+function tryAutoLoad(){
+  const fs = $('#fileStatus');
+  let b64;
+  try{ b64 = localStorage.getItem(LS_FILE); } catch(err){ return; }
+  if(!b64) return;
+  try{
+    const buf = base64ToArrayBuffer(b64);
+    WORKBOOK = XLSX.read(buf, {type:'array', cellStyles:true});
+    const sel = $('#sheetSel');
+    sel.innerHTML = '';
+    for(const name of WORKBOOK.SheetNames){
+      const opt = document.createElement('option'); opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    $('#sheetPick').style.display = WORKBOOK.SheetNames.length > 1 ? 'flex' : 'none';
+    const savedSheet = localStorage.getItem(LS_SHEET);
+    const sheetToUse = (savedSheet && WORKBOOK.SheetNames.includes(savedSheet)) ? savedSheet : WORKBOOK.SheetNames[0];
+    sel.value = sheetToUse;
+    const fname = localStorage.getItem(LS_NAME) || 'збережений файл';
+    fs.className = 'status';
+    fs.textContent = 'Завантажено збережені дані (' + fname + '). Щоб оновити — оберіть новий файл вище.';
+    $('#clearBtn').style.display = 'inline-block';
+    const savedMonth = localStorage.getItem(LS_MONTH);
+    if(savedMonth) pendingMonth = savedMonth;
+    loadSheet(sheetToUse);
+  } catch(err){
+    fs.className = 'status err';
+    fs.textContent = 'Не вдалося відновити збережені дані: ' + err.message;
+  }
+}
+tryAutoLoad();
 
 function renderCalendar(block, row){
   const wrap = document.createElement('div');
   wrap.className = 'cal';
+
+  const head = document.createElement('div'); head.className = 'calhead';
   const h = document.createElement('h2'); h.textContent = row.label.trim();
+  const pinBtn = document.createElement('button');
+  pinBtn.type = 'button'; pinBtn.className = 'pinbtn';
+  const pinnedNow = isPinned(row.label);
+  pinBtn.textContent = pinnedNow ? '★' : '☆';
+  pinBtn.title = pinnedNow ? 'Відкріпити з головної' : 'Закріпити на головній';
+  pinBtn.addEventListener('click', () => { togglePinned(row.label); renderView(); });
+  head.appendChild(h); head.appendChild(pinBtn);
+  wrap.appendChild(head);
+
+  const shiftCount = row.marks.size;
   const who = document.createElement('p'); who.className = 'who';
-  who.textContent = (block.month ? block.month + ' · ' : '') + block.title;
-  wrap.appendChild(h); wrap.appendChild(who);
+  who.textContent = (block.month ? block.month + ' · ' : '') + block.title + ' · змін: ' + shiftCount;
+  wrap.appendChild(who);
 
   const grid = document.createElement('div'); grid.className = 'grid';
   const dowNames = {пн:'Пн', вт:'Вт', ср:'Ср', чт:'Чт', пт:'Пт', сб:'Сб', нд:'Нд'};
@@ -323,23 +434,67 @@ function renderView(){
   const out = $('#calendars');
   out.innerHTML = '';
   const month = $('#month').value;
+  try{ localStorage.setItem(LS_MONTH, month); } catch(err){}
   const q = $('#q').value.trim().toLowerCase();
-  if(!q){ out.innerHTML = '<p class="empty-note">Почніть вводити прізвище вище, щоб побачити календар.</p>'; return; }
   const monthBlocks = BLOCKS.filter(b => (b.month || 'Без назви') === month);
-  let found = 0;
-  for(const b of monthBlocks){
-    for(const r of b.rows){
-      if(!r.isSection && r.label.trim().toLowerCase() === q){ out.appendChild(renderCalendar(b, r)); found++; }
-    }
-  }
-  if(!found){
+  const shown = new Set();
+  let renderedAny = false;
+
+  const pinnedList = getPinned();
+  if(pinnedList.length){
+    const matches = [];
     for(const b of monthBlocks){
       for(const r of b.rows){
-        if(!r.isSection && r.label.toLowerCase().includes(q)){ out.appendChild(renderCalendar(b, r)); found++; }
+        if(!r.isSection && pinnedList.includes(r.label.trim().toLowerCase())) matches.push({b, r});
+      }
+    }
+    if(matches.length){
+      const hdr = document.createElement('p'); hdr.className = 'pinned-hdr'; hdr.textContent = 'Закріплені';
+      out.appendChild(hdr);
+      for(const {b, r} of matches){
+        out.appendChild(renderCalendar(b, r));
+        shown.add(b.title + '|' + r.label.trim().toLowerCase());
+        renderedAny = true;
       }
     }
   }
-  if(!found) out.innerHTML = '<p class="empty-note">У цьому місяці нікого не знайдено за таким прізвищем.</p>';
+
+  if(q){
+    let exact = [];
+    for(const b of monthBlocks){
+      for(const r of b.rows){
+        if(!r.isSection && r.label.trim().toLowerCase() === q) exact.push({b, r});
+      }
+    }
+    if(!exact.length){
+      for(const b of monthBlocks){
+        for(const r of b.rows){
+          if(!r.isSection && r.label.toLowerCase().includes(q)) exact.push({b, r});
+        }
+      }
+    }
+    let found = 0;
+    for(const {b, r} of exact){
+      const key = b.title + '|' + r.label.trim().toLowerCase();
+      if(shown.has(key)) continue;
+      out.appendChild(renderCalendar(b, r));
+      shown.add(key);
+      found++;
+      renderedAny = true;
+    }
+    if(!found && !shown.size){
+      const note = document.createElement('p'); note.className = 'empty-note';
+      note.textContent = 'У цьому місяці нікого не знайдено за таким прізвищем.';
+      out.appendChild(note);
+      renderedAny = true;
+    }
+  }
+
+  if(!renderedAny){
+    const note = document.createElement('p'); note.className = 'empty-note';
+    note.textContent = 'Почніть вводити прізвище вище, щоб побачити календар, або натисніть ☆ біля картки, щоб закріпити працівника на головній.';
+    out.appendChild(note);
+  }
 }
 
 $('#q').addEventListener('input', renderView);
