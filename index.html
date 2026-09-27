@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Графік працівників — календар</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#f6f7f5; --panel:#ffffff; --ink:#1c2b26; --muted:#6b7a74;
+    --line:#dfe6e2; --accent:#2f6f52; --accent-soft:#e4f0e9;
+    --warn:#b5541f; --warn-soft:#fbe9df;
+    --night:#20242b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    padding:24px 16px 60px;}
+  .wrap{max-width:920px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px;font-weight:700}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 20px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+  label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+  input[type=text],select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+    font-size:14px;background:#fbfdfc;color:var(--ink)}
+  input[type=text]:focus,select:focus{outline:2px solid var(--accent);outline-offset:1px}
+  button{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 16px;
+    font-size:14px;font-weight:600;cursor:pointer}
+  button:hover{background:#255a41}
+  .status{font-size:13px;margin-top:10px;color:var(--muted)}
+  .status.err{color:var(--warn)}
+  #picker{display:none}
+  .row2{display:flex;gap:12px;flex-wrap:wrap}
+  .row2>div{flex:1;min-width:180px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:12px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+  #calendars{display:none}
+  .cal{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:18px}
+  .cal h2{font-size:16px;margin:0 0 2px}
+  .cal .who{font-size:13px;color:var(--muted);margin:0 0 14px}
+  .grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+  .dow{font-size:11px;color:var(--muted);text-align:center;padding-bottom:4px}
+  .cell{aspect-ratio:1/1;border-radius:8px;background:#fafcfb;border:1px solid var(--line);
+    display:flex;flex-direction:column;justify-content:space-between;padding:6px;min-height:56px}
+  .cell.pad{background:transparent;border:none}
+  .cell .d{font-size:12px;font-weight:600}
+  .cell .t{font-size:10px;line-height:1.2;word-break:break-word}
+  .cell.night{background:var(--night);border-color:var(--night)}
+  .cell.night .d, .cell.night .t{color:#f2f2f2}
+  .empty-note{font-size:13px;color:var(--muted)}
+  #sheetPick{display:none;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Графік працівників</h1>
+  <p class="sub">Завантажте таблицю у форматі Excel (.xlsx) — тільки він зберігає кольори клітинок. Оберіть місяць і працівника — побачите звичайний календар: кольорова клітинка = денна зміна, темна = нічне чергування («черг»).</p>
+
+  <div class="panel">
+    <label for="xlsxFile">Файл .xlsx (Google Таблиці: Файл → Завантажити → Microsoft Excel (.xlsx))</label>
+    <input type="file" id="xlsxFile" accept=".xlsx">
+    <div class="status" id="fileStatus"></div>
+    <div class="row2" id="sheetPick">
+      <div>
+        <label for="sheetSel">Аркуш (вкладка)</label>
+        <select id="sheetSel"></select>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="picker">
+    <div class="row2">
+      <div>
+        <label for="month">Місяць</label>
+        <select id="month"></select>
+      </div>
+      <div>
+        <label for="q">Працівник</label>
+        <input type="text" id="q" list="names" placeholder="Почніть вводити прізвище…" autocomplete="off">
+        <datalist id="names"></datalist>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i style="background:#fafcfb"></i>порожня клітинка</span>
+      <span><i style="background:#c9e6d5"></i>колір і текст — точно як у таблиці</span>
+    </div>
+  </div>
+
+  <div id="calendars"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let BLOCKS = [];
+let MONTHS_ORDER = [];
+let WORKBOOK = null;
+const WEEKDAYS = ['пн','вт','ср','чт','пт','сб','нд'];
+const MONTH_NAMES = ['січень','лютий','березень','квітень','травень','червень','липень','серпень','вересень','жовтень','листопад','грудень'];
+
+function isWeekdayRow(row){
+  let n = 0;
+  for(const c of row){
+    const v = (c.v||'').toLowerCase();
+    if(WEEKDAYS.some(w => v.startsWith(w))) n++;
+  }
+  return n >= 4;
+}
+function isDateRow(row){
+  let n = 0;
+  for(const c of row){
+    if(/^([1-9]|[12][0-9]|3[01])$/.test(c.v||'')) n++;
+  }
+  return n >= 4;
+}
+function isSectionLabel(label){
+  const t = label.trim();
+  if(!t) return false;
+  if(t.endsWith(':')) return true;
+  if(!/\s/.test(t)) return true;
+  return false;
+}
+function isMonthLabel(label){
+  return MONTH_NAMES.includes(label.trim().toLowerCase());
+}
+
+function buildBlocks(grid){
+  const blocks = [];
+  let i = 0;
+  let currentMonth = null;
+  while(i < grid.length){
+    if(isWeekdayRow(grid[i])){
+      const wdRow = grid[i];
+      const headLabel = (wdRow[0].v||'').trim();
+      if(isMonthLabel(headLabel)) currentMonth = headLabel;
+      let dRow = null, j = i+1;
+      if(j < grid.length && isDateRow(grid[j])){ dRow = grid[j]; j++; }
+      const cols = [];
+      const maxLen = Math.max(wdRow.length, dRow ? dRow.length : 0);
+      for(let c=1;c<maxLen;c++){
+        const day = dRow ? (dRow[c].v||'').trim() : '';
+        const wd = (wdRow[c]?.v||'').trim().toLowerCase().slice(0,2);
+        if(/^\d{1,2}$/.test(day) && WEEKDAYS.includes(wd)) cols.push({idx:c, weekday: wd, day: parseInt(day,10)});
+      }
+      const block = {title:null, month: currentMonth, cols, rows:[]};
+      let k = j;
+      while(k < grid.length && !isWeekdayRow(grid[k])){
+        const r = grid[k];
+        const label = (r[0]?.v||'').trim();
+        if(label){
+          if(isMonthLabel(label)){
+            currentMonth = label;
+          } else if(isSectionLabel(label)){
+            block.rows.push({label, isSection:true, marks:new Map()});
+          } else {
+            const marks = new Map();
+            for(const col of cols){
+              const cell = r[col.idx];
+              if(!cell) continue;
+              const text = (cell.v||'').trim();
+              const bg = cell.bg;
+              if(text || bg) marks.set(col.day, {text, bg});
+            }
+            block.rows.push({label, isSection:false, marks});
+          }
+        }
+        k++;
+      }
+      const firstSection = block.rows.find(x => x.isSection);
+      block.title = firstSection ? firstSection.label.replace(/:$/,'') : 'Графік';
+      if(cols.length) blocks.push(block);
+      i = k;
+    } else i++;
+  }
+  let firstLabeled = blocks.findIndex(b => b.month);
+  if(firstLabeled > 0){ for(let x=0;x<firstLabeled;x++) blocks[x].month = 'Січень'; }
+  else if(firstLabeled === -1 && blocks.length){ for(const b of blocks) b.month = 'Січень'; }
+  return blocks;
+}
+
+function sheetToGrid(ws){
+  if(!ws['!ref']) return [];
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const grid = [];
+  for(let r=range.s.r; r<=range.e.r; r++){
+    const row = [];
+    for(let c=range.s.c; c<=range.e.c; c++){
+      const addr = XLSX.utils.encode_cell({r,c});
+      const cell = ws[addr];
+      let v = '';
+      if(cell) v = (cell.w !== undefined ? cell.w : (cell.v !== undefined ? String(cell.v) : ''));
+      let bg = null;
+      if(cell && cell.s){
+        const fill = cell.s.fgColor || cell.s.bgColor;
+        if(fill && fill.rgb && !/^(FFFFFFFF|00000000|FFFFFF)$/i.test(fill.rgb)){
+          bg = '#' + fill.rgb.slice(-6);
+        }
+      }
+      row.push({v: (v||'').toString().trim(), bg});
+    }
+    grid.push(row);
+  }
+  return grid;
+}
+
+function loadSheet(name){
+  const fs = $('#fileStatus');
+  try{
+    const ws = WORKBOOK.Sheets[name];
+    const grid = sheetToGrid(ws);
+    BLOCKS = buildBlocks(grid);
+    if(!BLOCKS.length) throw new Error('Не знайдено розпізнаваної структури графіка на цьому аркуші');
+    fs.className = 'status';
+    fs.textContent = `Готово: розпізнано ${BLOCKS.length} відділ(и/ень) на аркуші "${name}".`;
+    initPicker();
+  } catch(err){
+    fs.className = 'status err';
+    fs.textContent = 'Помилка розбору: ' + err.message;
+  }
+}
+
+$('#xlsxFile').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  const fs = $('#fileStatus');
+  if(!file) return;
+  fs.className = 'status'; fs.textContent = 'Читання файлу…';
+  try{
+    const buf = await file.arrayBuffer();
+    WORKBOOK = XLSX.read(buf, {type:'array', cellStyles:true});
+    const sel = $('#sheetSel');
+    sel.innerHTML = '';
+    for(const name of WORKBOOK.SheetNames){
+      const opt = document.createElement('option'); opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    $('#sheetPick').style.display = WORKBOOK.SheetNames.length > 1 ? 'flex' : 'none';
+    loadSheet(WORKBOOK.SheetNames[0]);
+  } catch(err){
+    fs.className = 'status err';
+    fs.textContent = 'Не вдалось прочитати файл: ' + err.message;
+  }
+});
+$('#sheetSel').addEventListener('change', e => loadSheet(e.target.value));
+
+function initPicker(){
+  MONTHS_ORDER = [];
+  for(const b of BLOCKS){
+    const m = b.month || 'Без назви';
+    if(!MONTHS_ORDER.includes(m)) MONTHS_ORDER.push(m);
+  }
+  const monthSel = $('#month');
+  monthSel.innerHTML = '';
+  for(const m of MONTHS_ORDER){
+    const opt = document.createElement('option'); opt.value = m; opt.textContent = m;
+    monthSel.appendChild(opt);
+  }
+  monthSel.value = MONTHS_ORDER[MONTHS_ORDER.length - 1];
+
+  const dl = $('#names');
+  dl.innerHTML = '';
+  const seen = new Set();
+  for(const b of BLOCKS){
+    for(const r of b.rows){
+      if(!r.isSection && !seen.has(r.label)){
+        seen.add(r.label);
+        const opt = document.createElement('option'); opt.value = r.label.trim();
+        dl.appendChild(opt);
+      }
+    }
+  }
+  $('#picker').style.display = 'block';
+  $('#calendars').style.display = 'block';
+  $('#calendars').innerHTML = '<p class="empty-note">Оберіть місяць і почніть вводити прізвище, щоб побачити календар.</p>';
+}
+
+function renderCalendar(block, row){
+  const wrap = document.createElement('div');
+  wrap.className = 'cal';
+  const h = document.createElement('h2'); h.textContent = row.label.trim();
+  const who = document.createElement('p'); who.className = 'who';
+  who.textContent = (block.month ? block.month + ' · ' : '') + block.title;
+  wrap.appendChild(h); wrap.appendChild(who);
+
+  const grid = document.createElement('div'); grid.className = 'grid';
+  const dowNames = {пн:'Пн', вт:'Вт', ср:'Ср', чт:'Чт', пт:'Пт', сб:'Сб', нд:'Нд'};
+  for(const w of WEEKDAYS){
+    const d = document.createElement('div'); d.className = 'dow'; d.textContent = dowNames[w];
+    grid.appendChild(d);
+  }
+  const byDay = new Map(block.cols.map(c => [c.day, c]));
+  const sortedDays = block.cols.map(c=>c.day).sort((a,b)=>a-b);
+  const firstCol = byDay.get(sortedDays[0]);
+  const leadPad = WEEKDAYS.indexOf(firstCol.weekday);
+  for(let p=0;p<leadPad;p++){
+    const pad = document.createElement('div'); pad.className='cell pad'; grid.appendChild(pad);
+  }
+  for(const day of sortedDays){
+    const cell = document.createElement('div'); cell.className = 'cell';
+    const mark = row.marks.get(day);
+    if(mark && mark.bg){
+      cell.style.background = mark.bg;
+      cell.style.borderColor = mark.bg;
+    } else if(mark && mark.text){
+      cell.style.background = 'var(--accent-soft)';
+      cell.style.borderColor = 'var(--accent)';
+    }
+    const dEl = document.createElement('div'); dEl.className = 'd'; dEl.textContent = day;
+    cell.appendChild(dEl);
+    if(mark && mark.text){
+      const tEl = document.createElement('div'); tEl.className = 't'; tEl.textContent = mark.text;
+      cell.appendChild(tEl);
+    }
+    grid.appendChild(cell);
+  }
+  wrap.appendChild(grid);
+  return wrap;
+}
+
+function renderView(){
+  const out = $('#calendars');
+  out.innerHTML = '';
+  const month = $('#month').value;
+  const q = $('#q').value.trim().toLowerCase();
+  if(!q){ out.innerHTML = '<p class="empty-note">Почніть вводити прізвище вище, щоб побачити календар.</p>'; return; }
+  const monthBlocks = BLOCKS.filter(b => (b.month || 'Без назви') === month);
+  let found = 0;
+  for(const b of monthBlocks){
+    for(const r of b.rows){
+      if(!r.isSection && r.label.trim().toLowerCase() === q){ out.appendChild(renderCalendar(b, r)); found++; }
+    }
+  }
+  if(!found){
+    for(const b of monthBlocks){
+      for(const r of b.rows){
+        if(!r.isSection && r.label.toLowerCase().includes(q)){ out.appendChild(renderCalendar(b, r)); found++; }
+      }
+    }
+  }
+  if(!found) out.innerHTML = '<p class="empty-note">У цьому місяці нікого не знайдено за таким прізвищем.</p>';
+}
+
+$('#q').addEventListener('input', renderView);
+$('#month').addEventListener('change', renderView);
+</script>
+</body>
+</html>
