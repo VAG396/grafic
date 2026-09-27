@@ -113,9 +113,11 @@ const MONTH_NAMES = ['січень','лютий','березень','квіте�
 const NORMALIZED_GREEN = '#2f6f52'; // будь-який колір комірки, крім чорного, зводиться до цього зеленого
 const TRINITY_PURPLE = '#4c1925'; // колір для комірок зі словом "триніті" (з допуском на одруки)
 const TRINITY_WORD = 'триніті';
+const VACATION_GRAY = '#9e9e9e'; // колір діапазону "відпустка"
+const VACATION_WORD = 'відпустка';
 
-// Відстань Левенштейна — щоб ловити "триніті" навіть з одрукою (пропущена/зайва/
-// переставлена літера), а не лише точний збіг.
+// Відстань Левенштейна — щоб ловити ключові слова навіть з одрукою (пропущена/
+// зайва/переставлена літера), а не лише точний збіг.
 function levenshtein(a, b){
   const m = a.length, n = b.length;
   const dp = new Array(n+1);
@@ -131,17 +133,19 @@ function levenshtein(a, b){
   return dp[n];
 }
 
-// Шукає у тексті комірки слово, схоже на "триніті" (без урахування регістру,
-// з допуском до 2 помилок на слово довжиною ~7 літер).
-function hasTrinityWord(text){
+// Шукає у тексті комірки слово, схоже на targetWord (без урахування регістру,
+// з допуском до 2 помилок на слово приблизно такої ж довжини).
+function hasFuzzyWord(text, targetWord){
   if(!text) return false;
   const words = text.toLowerCase().split(/[^a-zа-яіїєґ']+/i).filter(Boolean);
   for(const w of words){
-    if(Math.abs(w.length - TRINITY_WORD.length) > 3) continue;
-    if(levenshtein(w, TRINITY_WORD) <= 2) return true;
+    if(Math.abs(w.length - targetWord.length) > 3) continue;
+    if(levenshtein(w, targetWord) <= 2) return true;
   }
   return false;
 }
+function hasTrinityWord(text){ return hasFuzzyWord(text, TRINITY_WORD); }
+function hasVacationWord(text){ return hasFuzzyWord(text, VACATION_WORD); }
 
 // Чорний лишається чорним, білий/прозорий трактується як порожня комірка (bg=null),
 // будь-який інший колір заливки зводиться до єдиного зеленого — щоб календар не
@@ -149,6 +153,23 @@ function hasTrinityWord(text){
 function normalizeColor(hex){
   if(!hex) return null;
   return hex.toUpperCase() === '#000000' ? hex : NORMALIZED_GREEN;
+}
+
+// Правило "відпустка": від комірки зі словом "відпустка" (з допуском на одруки)
+// і до останньої підряд комірки, що має той самий колір, що й стартова —
+// увесь цей діапазон фарбується в сірий. Чорні комірки ніколи не займаються.
+function applyVacationRanges(dayCells){
+  for(let i=0;i<dayCells.length;i++){
+    const cell = dayCells[i];
+    if(cell.locked || !hasVacationWord(cell.text)) continue;
+    const refColor = cell.color;
+    let j = i;
+    while(j < dayCells.length && !dayCells[j].locked && dayCells[j].color === refColor){
+      dayCells[j].color = VACATION_GRAY;
+      j++;
+    }
+    i = j - 1;
+  }
 }
 
 const LS_FILE = 'scheduleApp:fileData';
@@ -281,21 +302,28 @@ function buildRecords(blocks, sheetName){
   for(const b of blocks){
     for(const r of b.rows){
       if(r.isSection) continue;
-      for(const col of b.cols){
+      // 1) базовий колір кожного дня рядка: чорний — пріоритетний і незмінний,
+      //    інакше "триніті" (з допуском на одруки) перезаписує на бордовий.
+      const dayCells = b.cols.map(col => {
         const mark = r.marks.get(col.day) || {text:'', bg:null};
-        // Чорний має найвищий пріоритет і ніколи не перезаписується (навіть якщо
-        // в тексті знайдено "триніті") — лише не-чорні комірки можуть стати "триніті"-кольором.
         const isBlack = mark.bg && mark.bg.toUpperCase() === '#000000';
         const color = isBlack ? mark.bg : (hasTrinityWord(mark.text) ? TRINITY_PURPLE : (mark.bg || ''));
+        return {day: col.day, weekday: col.weekday, text: mark.text || '', color, locked: !!isBlack};
+      });
+      dayCells.sort((a,c) => a.day - c.day);
+      // 2) правило "відпустка": розтягує сірий колір від поміченої комірки на
+      //    весь наступний підряд-діапазон того самого кольору.
+      applyVacationRanges(dayCells);
+      for(const dc of dayCells){
         out.push({
           sheet: sheetName,
           section: b.title || '',
           month: b.month || '',
           doctor: r.label.trim(),
-          day: col.day,
-          weekday: col.weekday,
-          color: color,
-          text: mark.text || ''
+          day: dc.day,
+          weekday: dc.weekday,
+          color: dc.color,
+          text: dc.text
         });
       }
     }
