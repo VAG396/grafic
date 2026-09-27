@@ -106,14 +106,26 @@ const $ = s => document.querySelector(s);
 let BLOCKS = [];
 let MONTHS_ORDER = [];
 let WORKBOOK = null;
+let RECORDS = []; // структурований кеш даних парсингу — для подальшого використання в програмі
+let GROUPS = []; // RECORDS, згруповані по (секція, місяць, лікар) — джерело даних для календаря
 const WEEKDAYS = ['пн','вт','ср','чт','пт','сб','нд'];
 const MONTH_NAMES = ['січень','лютий','березень','квітень','травень','червень','липень','серпень','вересень','жовтень','листопад','грудень'];
+const NORMALIZED_GREEN = '#2f6f52'; // будь-який колір комірки, крім чорного, зводиться до цього зеленого
+
+// Чорний лишається чорним, білий/прозорий трактується як порожня комірка (bg=null),
+// будь-який інший колір заливки зводиться до єдиного зеленого — щоб календар не
+// строкатів довільними кольорами з файлу, а показував лише "є зміна" / "немає".
+function normalizeColor(hex){
+  if(!hex) return null;
+  return hex.toUpperCase() === '#000000' ? hex : NORMALIZED_GREEN;
+}
 
 const LS_FILE = 'scheduleApp:fileData';
 const LS_NAME = 'scheduleApp:fileName';
 const LS_SHEET = 'scheduleApp:sheet';
 const LS_MONTH = 'scheduleApp:month';
 const LS_PINNED = 'scheduleApp:pinned';
+const LS_RECORDS = 'scheduleApp:records'; // кеш структурованих даних (лікар/місяць/день/колір/текст)
 let pendingMonth = null;
 
 function arrayBufferToBase64(buf){
@@ -228,6 +240,73 @@ function buildBlocks(grid){
   return blocks;
 }
 
+// Перетворює BLOCKS (проміжну структуру парсера) у плаский структурований масив
+// записів (по одному на кожну комірку графіка): лікар, місяць, день, день тижня,
+// колір комірки, текст комірки. Це і є кеш даних парсингу — саме RECORDS (через
+// групування у GROUPS, див. groupRecords нижче) тепер малює календар, а BLOCKS
+// далі використовується лише як службовий крок парсингу.
+function buildRecords(blocks, sheetName){
+  const out = [];
+  for(const b of blocks){
+    for(const r of b.rows){
+      if(r.isSection) continue;
+      for(const col of b.cols){
+        const mark = r.marks.get(col.day) || {text:'', bg:null};
+        out.push({
+          sheet: sheetName,
+          section: b.title || '',
+          month: b.month || '',
+          doctor: r.label.trim(),
+          day: col.day,
+          weekday: col.weekday,
+          color: mark.bg || '',
+          text: mark.text || ''
+        });
+      }
+    }
+  }
+  out.sort((a,c) => a.doctor.localeCompare(c.doctor) || a.day - c.day);
+  return out;
+}
+
+// Групує плаский масив записів у "картки" — по одній на пару (секція, місяць,
+// лікар) — саме ці групи тепер малює календар, замість BLOCKS/rows.
+function groupRecords(records){
+  const map = new Map();
+  for(const r of records){
+    const key = r.section + '|' + r.month + '|' + r.doctor.trim().toLowerCase();
+    let g = map.get(key);
+    if(!g){ g = {sheet:r.sheet, section:r.section, month:r.month, doctor:r.doctor, cells:new Map()}; map.set(key, g); }
+    g.cells.set(r.day, {weekday:r.weekday, color:r.color, text:r.text});
+  }
+  return [...map.values()];
+}
+
+function monthSortIndex(m){
+  const idx = MONTH_NAMES.indexOf((m||'').trim().toLowerCase());
+  return idx === -1 ? MONTH_NAMES.length : idx;
+}
+
+function cacheRecords(records){
+  RECORDS = records;
+  GROUPS = groupRecords(records); // те, що фактично рендерить календар
+  window.SCHEDULE_RECORDS = records; // прямий доступ з консолі/подальшого коду цієї сторінки
+  try{ localStorage.setItem(LS_RECORDS, JSON.stringify(records)); } catch(err){ console.warn('Не вдалося закешувати дані:', err); }
+}
+
+// Хелпер для подальшої роботи: вибірка із закешованих даних за потрібними полями.
+// Приклад: getScheduleRecords({doctor:'Іваненко', month:'Вересень'})
+function getScheduleRecords(filter){
+  filter = filter || {};
+  return RECORDS.filter(r =>
+    (!filter.doctor || r.doctor.toLowerCase().includes(filter.doctor.toLowerCase())) &&
+    (!filter.month  || r.month === filter.month) &&
+    (!filter.sheet  || r.sheet === filter.sheet) &&
+    (!filter.day    || r.day === filter.day)
+  );
+}
+window.getScheduleRecords = getScheduleRecords;
+
 function sheetToGrid(ws){
   if(!ws['!ref']) return [];
   const range = XLSX.utils.decode_range(ws['!ref']);
@@ -243,7 +322,7 @@ function sheetToGrid(ws){
       if(cell && cell.s){
         const fill = cell.s.fgColor || cell.s.bgColor;
         if(fill && fill.rgb && !/^(FFFFFFFF|00000000|FFFFFF)$/i.test(fill.rgb)){
-          bg = '#' + fill.rgb.slice(-6);
+          bg = normalizeColor('#' + fill.rgb.slice(-6));
         }
       }
       row.push({v: (v||'').toString().trim(), bg});
@@ -260,6 +339,7 @@ function loadSheet(name){
     const grid = sheetToGrid(ws);
     BLOCKS = buildBlocks(grid);
     if(!BLOCKS.length) throw new Error('Не знайдено розпізнаваної структури графіка на цьому аркуші');
+    cacheRecords(buildRecords(BLOCKS, name));
     fs.className = 'status';
     fs.textContent = '';
     initPicker();
@@ -311,11 +391,10 @@ $('#clearBtn').addEventListener('click', () => {
 });
 
 function initPicker(){
-  MONTHS_ORDER = [];
-  for(const b of BLOCKS){
-    const m = b.month || 'Без назви';
-    if(!MONTHS_ORDER.includes(m)) MONTHS_ORDER.push(m);
-  }
+  // Джерело даних тут і нижче — RECORDS/GROUPS, а не BLOCKS.
+  const monthsSet = new Set(RECORDS.map(r => r.month || 'Без назви'));
+  MONTHS_ORDER = [...monthsSet].sort((a,b) => monthSortIndex(a) - monthSortIndex(b));
+
   const monthSel = $('#month');
   monthSel.innerHTML = '';
   for(const m of MONTHS_ORDER){
@@ -329,13 +408,11 @@ function initPicker(){
   const dl = $('#names');
   dl.innerHTML = '';
   const seen = new Set();
-  for(const b of BLOCKS){
-    for(const r of b.rows){
-      if(!r.isSection && !seen.has(r.label)){
-        seen.add(r.label);
-        const opt = document.createElement('option'); opt.value = r.label.trim();
-        dl.appendChild(opt);
-      }
+  for(const r of RECORDS){
+    if(!seen.has(r.doctor)){
+      seen.add(r.doctor);
+      const opt = document.createElement('option'); opt.value = r.doctor;
+      dl.appendChild(opt);
     }
   }
   $('#picker').style.display = 'block';
@@ -375,24 +452,25 @@ function tryAutoLoad(){
 }
 tryAutoLoad();
 
-function renderCalendar(block, row){
+// Малює один календар з групи RECORDS (group.cells: day -> {weekday,color,text}).
+function renderCalendar(group){
   const wrap = document.createElement('div');
   wrap.className = 'cal';
 
   const head = document.createElement('div'); head.className = 'calhead';
-  const h = document.createElement('h2'); h.textContent = row.label.trim();
+  const h = document.createElement('h2'); h.textContent = group.doctor;
   const pinBtn = document.createElement('button');
   pinBtn.type = 'button'; pinBtn.className = 'pinbtn';
-  const pinnedNow = isPinned(row.label);
+  const pinnedNow = isPinned(group.doctor);
   pinBtn.textContent = pinnedNow ? '★' : '☆';
   pinBtn.title = pinnedNow ? 'Відкріпити з головної' : 'Закріпити на головній';
-  pinBtn.addEventListener('click', () => { togglePinned(row.label); renderView(); });
+  pinBtn.addEventListener('click', () => { togglePinned(group.doctor); renderView(); });
   head.appendChild(h); head.appendChild(pinBtn);
   wrap.appendChild(head);
 
-  const shiftCount = row.marks.size;
+  const shiftCount = [...group.cells.values()].filter(c => c.text || c.color).length;
   const who = document.createElement('p'); who.className = 'who';
-  who.textContent = (block.month ? block.month + ' · ' : '') + block.title + ' · змін: ' + shiftCount;
+  who.textContent = (group.month ? group.month + ' · ' : '') + (group.section || 'Графік') + ' · змін: ' + shiftCount;
   wrap.appendChild(who);
 
   const grid = document.createElement('div'); grid.className = 'grid';
@@ -401,27 +479,26 @@ function renderCalendar(block, row){
     const d = document.createElement('div'); d.className = 'dow'; d.textContent = dowNames[w];
     grid.appendChild(d);
   }
-  const byDay = new Map(block.cols.map(c => [c.day, c]));
-  const sortedDays = block.cols.map(c=>c.day).sort((a,b)=>a-b);
-  const firstCol = byDay.get(sortedDays[0]);
-  const leadPad = WEEKDAYS.indexOf(firstCol.weekday);
+  const sortedDays = [...group.cells.keys()].sort((a,b)=>a-b);
+  const firstCell = group.cells.get(sortedDays[0]);
+  const leadPad = WEEKDAYS.indexOf(firstCell.weekday);
   for(let p=0;p<leadPad;p++){
     const pad = document.createElement('div'); pad.className='cell pad'; grid.appendChild(pad);
   }
   for(const day of sortedDays){
     const cell = document.createElement('div'); cell.className = 'cell';
-    const mark = row.marks.get(day);
-    if(mark && mark.bg){
-      cell.style.background = mark.bg;
-      cell.style.borderColor = mark.bg;
-    } else if(mark && mark.text){
+    const cellData = group.cells.get(day);
+    if(cellData.color){
+      cell.style.background = cellData.color;
+      cell.style.borderColor = cellData.color;
+    } else if(cellData.text){
       cell.style.background = 'var(--accent-soft)';
       cell.style.borderColor = 'var(--accent)';
     }
     const dEl = document.createElement('div'); dEl.className = 'd'; dEl.textContent = day;
     cell.appendChild(dEl);
-    if(mark && mark.text){
-      const tEl = document.createElement('div'); tEl.className = 't'; tEl.textContent = mark.text;
+    if(cellData.text){
+      const tEl = document.createElement('div'); tEl.className = 't'; tEl.textContent = cellData.text;
       cell.appendChild(tEl);
     }
     grid.appendChild(cell);
@@ -436,48 +513,33 @@ function renderView(){
   const month = $('#month').value;
   try{ localStorage.setItem(LS_MONTH, month); } catch(err){}
   const q = $('#q').value.trim().toLowerCase();
-  const monthBlocks = BLOCKS.filter(b => (b.month || 'Без назви') === month);
+  const monthGroups = GROUPS.filter(g => (g.month || 'Без назви') === month);
   const shown = new Set();
   let renderedAny = false;
+  const keyOf = g => g.section + '|' + g.doctor.trim().toLowerCase();
 
   const pinnedList = getPinned();
   if(pinnedList.length){
-    const matches = [];
-    for(const b of monthBlocks){
-      for(const r of b.rows){
-        if(!r.isSection && pinnedList.includes(r.label.trim().toLowerCase())) matches.push({b, r});
-      }
-    }
+    const matches = monthGroups.filter(g => pinnedList.includes(g.doctor.trim().toLowerCase()));
     if(matches.length){
       const hdr = document.createElement('p'); hdr.className = 'pinned-hdr'; hdr.textContent = 'Закріплені';
       out.appendChild(hdr);
-      for(const {b, r} of matches){
-        out.appendChild(renderCalendar(b, r));
-        shown.add(b.title + '|' + r.label.trim().toLowerCase());
+      for(const g of matches){
+        out.appendChild(renderCalendar(g));
+        shown.add(keyOf(g));
         renderedAny = true;
       }
     }
   }
 
   if(q){
-    let exact = [];
-    for(const b of monthBlocks){
-      for(const r of b.rows){
-        if(!r.isSection && r.label.trim().toLowerCase() === q) exact.push({b, r});
-      }
-    }
-    if(!exact.length){
-      for(const b of monthBlocks){
-        for(const r of b.rows){
-          if(!r.isSection && r.label.toLowerCase().includes(q)) exact.push({b, r});
-        }
-      }
-    }
+    let exact = monthGroups.filter(g => g.doctor.trim().toLowerCase() === q);
+    if(!exact.length) exact = monthGroups.filter(g => g.doctor.toLowerCase().includes(q));
     let found = 0;
-    for(const {b, r} of exact){
-      const key = b.title + '|' + r.label.trim().toLowerCase();
+    for(const g of exact){
+      const key = keyOf(g);
       if(shown.has(key)) continue;
-      out.appendChild(renderCalendar(b, r));
+      out.appendChild(renderCalendar(g));
       shown.add(key);
       found++;
       renderedAny = true;
