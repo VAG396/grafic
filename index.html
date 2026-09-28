@@ -150,21 +150,25 @@ function hasVacationWord(text){ return hasFuzzyWord(text, VACATION_WORD); }
 // Чорний лишається чорним, білий/прозорий трактується як порожня комірка (bg=null),
 // будь-який інший колір заливки зводиться до єдиного зеленого — щоб календар не
 // строкатів довільними кольорами з файлу, а показував лише "є зміна" / "немає".
+// Застосовується вже ПІСЛЯ порівняння діапазонів "відпустки" (яке працює за
+// оригінальним rawColor) — інакше різні кольори з файлу виглядали б однаково
+// зарано, і діапазон сірого міг "протікати" далі, ніж треба.
 function normalizeColor(hex){
   if(!hex) return null;
   return hex.toUpperCase() === '#000000' ? hex : NORMALIZED_GREEN;
 }
 
 // Правило "відпустка": від комірки зі словом "відпустка" (з допуском на одруки)
-// і до останньої підряд комірки, що має той самий колір, що й стартова —
-// увесь цей діапазон фарбується в сірий. Чорні комірки ніколи не займаються.
+// і до останньої підряд комірки, що має той самий ОРИГІНАЛЬНИЙ колір з файлу
+// (rawColor, а не вже зведений до зеленого), — увесь цей діапазон фарбується в
+// сірий. Чорні комірки ніколи не займаються.
 function applyVacationRanges(dayCells){
   for(let i=0;i<dayCells.length;i++){
     const cell = dayCells[i];
     if(cell.locked || !hasVacationWord(cell.text)) continue;
-    const refColor = cell.color;
+    const refColor = cell.rawColor;
     let j = i;
-    while(j < dayCells.length && !dayCells[j].locked && dayCells[j].color === refColor){
+    while(j < dayCells.length && !dayCells[j].locked && dayCells[j].rawColor === refColor){
       dayCells[j].color = VACATION_GRAY;
       j++;
     }
@@ -304,11 +308,14 @@ function buildRecords(blocks, sheetName){
       if(r.isSection) continue;
       // 1) базовий колір кожного дня рядка: чорний — пріоритетний і незмінний,
       //    інакше "триніті" (з допуском на одруки) перезаписує на бордовий.
+      //    rawColor — оригінальний колір із файлу, зберігаємо окремо, бо саме
+      //    за ним (а не за вже зведеним "color") треба порівнювати діапазон "відпустки".
       const dayCells = b.cols.map(col => {
         const mark = r.marks.get(col.day) || {text:'', bg:null};
-        const isBlack = mark.bg && mark.bg.toUpperCase() === '#000000';
-        const color = isBlack ? mark.bg : (hasTrinityWord(mark.text) ? TRINITY_PURPLE : (mark.bg || ''));
-        return {day: col.day, weekday: col.weekday, text: mark.text || '', color, locked: !!isBlack};
+        const rawColor = mark.bg || null;
+        const isBlack = rawColor && rawColor.toUpperCase() === '#000000';
+        const color = isBlack ? rawColor : (hasTrinityWord(mark.text) ? TRINITY_PURPLE : (normalizeColor(rawColor) || ''));
+        return {day: col.day, weekday: col.weekday, text: mark.text || '', rawColor, color, locked: !!isBlack};
       });
       dayCells.sort((a,c) => a.day - c.day);
       // 2) правило "відпустка": розтягує сірий колір від поміченої комірки на
@@ -385,7 +392,7 @@ function sheetToGrid(ws){
       if(cell && cell.s){
         const fill = cell.s.fgColor || cell.s.bgColor;
         if(fill && fill.rgb && !/^(FFFFFFFF|00000000|FFFFFF)$/i.test(fill.rgb)){
-          bg = normalizeColor('#' + fill.rgb.slice(-6));
+          bg = '#' + fill.rgb.slice(-6); // оригінальний колір з файлу — без зведення до зеленого
         }
       }
       row.push({v: (v||'').toString().trim(), bg});
